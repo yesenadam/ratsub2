@@ -1,2 +1,2 @@
 # ratsub2
-julia port of ratsub compiler
+vibe-coded julia port of ratsub compiler, very unfinished
