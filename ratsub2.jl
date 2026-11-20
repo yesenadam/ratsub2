@@ -1,6 +1,7 @@
 #!/usr/bin/env julia
 using Luxor
 using Colors
+const STROKE_SCALE = Ref(1.0)
 
 # ==============================================================================
 # 1. PROJECTIVE GEOMETRY CORE (HPoint & HLine) & RGB COLOUR TYPE
@@ -140,6 +141,7 @@ function compile_sdv(source::String)
     line_width = 0.25
     no_edges = false
     only_edges = false
+    colour_add_used = false
     margins = [5.0, 5.0, 5.0, 5.0] # left, top, right, bottom
 
     shape_exprs = Expr[]
@@ -171,9 +173,12 @@ function compile_sdv(source::String)
     function flush_shape!()
         current_shape === nothing && return
         args = [Symbol("p", i) for i in 0:(current_n - 1)]
+ #next bit changed from .. to save on heap allocations
+ #           sum(p.x / p.w for p in [$(args...)]) / $current_n,
+ #           sum(p.y / p.w for p in [$(args...)]) / $current_n
         centre_expr = uses_centre ? :(c = HPoint(
-            sum(p.x / p.w for p in [$(args...)]) / $current_n,
-            sum(p.y / p.w for p in [$(args...)]) / $current_n
+            sum(p.x / p.w for p in ($(args...),)) / $current_n,
+            sum(p.y / p.w for p in ($(args...),)) / $current_n
         )) : :()
         col_init = shape_col_expr === nothing ? :() : :(col = $shape_col_expr)
         leaf_draw = :(draw(step, max_level, dir, col, $(args...)))
@@ -202,15 +207,15 @@ function compile_sdv(source::String)
 
         fn = quote
             function $current_shape(step::Int, max_level::Int, dir::Int, col::Col3, $(args...))
-                step > max_level && return
                 rem = max_level - step
                 $col_init
                 $(point_stmts...)
                 $centre_expr
-                if rem == 0 && $(branch_mode != :eq)
+                if rem <= 0 && $(branch_mode != :eq)
                     $leaf_draw
                     return
                 end
+                step > max_level && return
                 $call_block
             end
         end
@@ -311,6 +316,7 @@ function compile_sdv(source::String)
                     elseif t == "rand"
                         next_col = :(rand_col()); i += 1
                     elseif t == "+" || t == "-"
+                        colour_add_used = true
                         sgn = t == "+" ? 1.0 : -1.0
                         if i + 3 <= length(toks) && all(is_num, toks[(i+1):(i+3)])
                             dr = sgn * parse(Float64, tok(toks, i + 1)) / 10
@@ -350,12 +356,12 @@ function compile_sdv(source::String)
                 elseif length(toks) == 4 && tok(toks, 2) == "refl"
                     push!(point_stmts, :($(Symbol(head)) = reflect_pt($(Symbol(tok(toks, 3))), $(Symbol(tok(toks, 4))))))
                 elseif tok(toks, 2) == "par"
-                              elseif tok(toks, 2) == "par"
+   #                           elseif tok(toks, 2) == "par"
                     pa = Symbol(tok(toks, 3))
                     pb = Symbol(tok(toks, 4))
                     pc = Symbol(tok(toks, 5))
                     push!(point_stmts, :($(Symbol(head)) = par_pt($pa, $pb, $pc)))
-  elseif occursin("..", head)
+                elseif occursin("..", head)
                     # Ranged point definitions: `p4..7 p0.. .5 p1..0`, `p3..6 p0 1..4/5 p1`, `p3..6 p0 1,3,5,8/9 p1`
                     rng = split(head[2:end], r"\.\.+")
                     p_start, p_end = parse(Int, first(rng)), parse(Int, last(rng))
@@ -457,7 +463,7 @@ function compile_sdv(source::String)
     flush_shape!()
 
     isempty(init_pts) && append!(init_pts, [HPoint(0, 0), HPoint(100, 0), HPoint(100, 100), HPoint(0, 100)])
-
+ 
     @eval function draw(step::Int, max_level::Int, dir::Int, col::Col3, pts...)
         lpts = [to_luxor(p) for p in pts]
         if !$only_edges
@@ -466,24 +472,26 @@ function compile_sdv(source::String)
         end
         if !$no_edges
             sethue(0, 0, 0)
-            setline($line_width)
+            setlinejoin("round")
+            setline($line_width * STROKE_SCALE[])
             poly(lpts, :stroke, close = true)
         end
     end
+
 
     for ex in shape_exprs
            println(ex)
         @eval $ex
     end
 
-    return (; main_shape, init_pts, bg_col, margins)
+     return (; main_shape, init_pts, bg_col, margins, colour_add_used)
 end
 
 # ==============================================================================
 # 4. RENDERER & CLI RUNNER (`julia ratsub2.jl myprog 1 7`)
 # ==============================================================================
 function render_level(prog, level::Int, outfile::String; size_px::Int = 1200)
-      outfile = abspath(outfile)   # <-- Forces Luxor to use your current folder instead of ~/
+    outfile = abspath(outfile)
 
     xs = [p.x / p.w for p in prog.init_pts]
     ys = [p.y / p.w for p in prog.init_pts]
@@ -496,14 +504,27 @@ function render_level(prog, level::Int, outfile::String; size_px::Int = 1200)
     sc = size_px / span
     cx, cy = (minx + maxx) / 2, (miny + maxy) / 2
 
-    @png begin
-background(prog.bg_col === nothing ? "white" : RGB(prog.bg_col.r, prog.bg_col.g, prog.bg_col.b))
-Luxor.scale(sc, -sc) # Flip Y so positive Y points UP just like PostScript!
-Luxor.translate(-cx, -cy)
-@eval $(prog.main_shape)(0, $level, 1, Col3(1.0, 1.0, 1.0), $(prog.init_pts)...)
-end size_px size_px outfile
-println("Saved $outfile")
+    STROKE_SCALE[] = (size_px / 10.0) / sc
+    init_col = prog.colour_add_used ? Col3(0.5, 0.5, 0.5) : Col3(0.0, 0.0, 0.0)
+
+    if endswith(outfile, ".svg")
+        @svg begin
+            background(prog.bg_col === nothing ? "white" : RGB(prog.bg_col.r, prog.bg_col.g, prog.bg_col.b))
+            Luxor.scale(sc, -sc)
+            Luxor.translate(-cx, -cy)
+            @eval $(prog.main_shape)(0, $level, 1, $init_col, $(prog.init_pts)...)
+        end size_px size_px outfile
+    else
+        @png begin
+            background(prog.bg_col === nothing ? "white" : RGB(prog.bg_col.r, prog.bg_col.g, prog.bg_col.b))
+            Luxor.scale(sc, -sc)
+            Luxor.translate(-cx, -cy)
+            @eval $(prog.main_shape)(0, $level, 1, $init_col, $(prog.init_pts)...)
+        end size_px size_px outfile
+    end
+    println("Saved $outfile")
 end
+
 function main(args::Vector{String})
     flags = filter(a -> startswith(a, "-"), args)
     pos_args = filter(a -> !startswith(a, "-"), args)
