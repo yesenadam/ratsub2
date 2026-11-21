@@ -16,16 +16,7 @@ include("ratsub2.jl")
 ### 2. Function Signature
 
 ```julia
-ratsub(
-    prog_name::AbstractString,
-    from_level::Int,
-    to_level::Union{Int, Nothing} = nothing;
-    size::Int = 1200,
-    hd::Bool = false,
-    format::AbstractString = "png",
-    emit_jl::Bool = false,
-    overwrite::Bool = false,
-)
+ratsub(prog_name,from_level,to_level = nothing; size = 1200,hd = false,format = "png",emit_jl = false,overwrite = false)
 ```
 
 Arguments before `;` are **positional** (passed in order); arguments after `;` are **keyword** (`name=value`) options.
